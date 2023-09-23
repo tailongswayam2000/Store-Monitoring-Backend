@@ -1,0 +1,156 @@
+refer this link : 
+https://www.notion.so/Solution-Loop-Backend-Task-Store-Monitoring-583c0d6c6e4142309a57f35344433023?pvs=4
+
+
+# Solution, Loop Backend Task - Store Monitoring
+
+- ***PROBLEM STATEMENT OVERVIEW***
+
+The project revolves around monitoring the online status of various restaurants across the United States and worldwide. To achieve this, we have three key data sources:
+
+1. Hourly status data for each restaurant, indicating whether it was active or inactive.
+2. Business hours for each restaurant, specifying their local time of operation.
+3. Timezone information for the restaurants, ensuring data consistency.
+
+The objective was fulfilled by developing a backend system using **Flask and MySQL** that efficiently processed and analyzed this data. Two APIs are created to **trigger report generation** and **retrieve the report's status or the corresponding CSV file**.
+
+The challenge lay in **extrapolating uptime and downtime** based on the periodic status data while **maintaining time-zone consistency**, filling **gaps within business hours**, and handling **variable intervals** for every weekday. All this was achieved along with keeping the report generation. 
+
+- ***KEY POINTS***
+1. The times have been stored as universal epoch times for ease of calculation at **seconds level**. This is done as we must calculate the uptime and downtimes for the **past 1 hour, 24 hours, and 24*7 hours**. Keeping the times in any other string format would complicate and make the code prone to errors.
+2. The code is **optimized** for generating a report in a reasonable time. On average, It takes around **30 seconds** to generate a report. 
+
+- ***STEPS TAKEN TO ACHIEVE THE TASK***
+1. UPLOAD THE CSV FILES
+    
+    the storestatus.csv is stored in the following format
+    
+    ![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/8a08b435-fff6-4dad-a157-1084dbce95de/9d064456-9c79-4e8a-be94-8ce1b68162f3/Untitled.png)
+    
+    the storetimezone.csv is stored as
+    
+    ![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/8a08b435-fff6-4dad-a157-1084dbce95de/b585e30b-2af5-474d-b389-48b34fdd2238/Untitled.png)
+    
+    the businesshours.csv is stored as
+    
+    ![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/8a08b435-fff6-4dad-a157-1084dbce95de/cedd312c-40f1-4908-ae42-64526bc81725/Untitled.png)
+    
+
+1. When the get_report endpoint is called,
+    - get the status of the report
+    - if the status is Running, return the "Running" message
+    - if the status is "Completed,” get the data for the report_id, create a CSV from the report_data, and return it along with status code 200
+2. When the trigger_report endpoint is called, 
+    - generate a uuid for report_id
+    - create a thread that does the background processing to create the report.
+    - start the thread
+    - Return the report_id
+3. The background processing happens as follows
+    1. Get all the store_ids_data of all timestamps
+        
+        ```python
+        store_ids_data = [
+            [1003713923115890238, 1674225169, 'active'],
+            [1004567882358859299, 1674052232, 'inactive'],
+            [1007392278459573100, 1674175130, 'active'],
+            [1009358099378516398, 1674228699, 'active'],
+            [1021872076660489708, 1674567087, 'inactive'],
+            ...
+        ]
+        ```
+        
+    2. Keep a dict of all the unique store_ids. This represents a dict of all the stores
+        
+        ```python
+        unique_store_ids = {
+            '1003713923115890238',
+            '1004567882358859299',
+            '1007392278459573100',
+            '1009358099378516398',
+            '1021872076660489708',
+        		...
+        }
+        ```
+        
+    3. Get a list of operational business hours for each weekday for all stores
+        
+        ```python
+        business_hours_data = [
+            [1481966498820158979, 4, "00:00:00", "03:10:00"],
+            [1481966498820158979, 2, "00:00:00", "03:10:00"],
+            [1481966498820158979, 0, "00:00:00", "03:10:00"],
+            ...
+        ]
+        ```
+        
+    4. Store all the operational business hours for every store in a dict format for fast retrieval
+        
+        ```python
+        business_hours_hash = {
+            "store_id_1": {
+                '0': [[17515, 22453], [67800, 90227], ...],
+                '1': [[ , ], [ , ], ...],
+                ...
+                '6': [[ , ], [ , ], ...]
+            },
+            "store_id_2": {
+                '0': [[12093, 23432], [77890, 101223], ...],
+                '1': [[ , ], [ , ], ...],
+                ...
+                '6': [[ , ], [ , ], ...]
+            },
+            ...
+        }
+        ```
+        
+    5. For every store, create a list of time intervals when it was expected to be active, roughly for the last eight days
+        
+        ```python
+        expected_active_intervals = {
+            "store_id_1": [
+                [1674048180, 1674082980],
+                [1674307380, 1674342180],
+                ...
+            ],
+            "store_id_1": [
+                [1674048180, 1674082980],
+                [1674307380, 1674342180],
+                ...
+            ],
+            ...
+        }
+        ```
+        
+    6. Generate the report data and store it in the database. To do this:
+        - we iterate over all store status entries
+        - since the entries are sorted acc to the store_id, all the store_ids occur together
+        - We keep on accumulating the data for a store_id in store_obj as:
+            
+            ```python
+            store_obj = {
+                '[1674048180, 1674082980]': [[1674048280,1674049180,..],[1,1,0,..]],
+                '[1684048180, 1684082980]': [[1684048280,1684049180,..],[0,1,0,..]],
+                ...
+            }
+            ```
+            
+        - For every list of times in an interval and corresponding values of statuses, we use interpolation of find the actual intervals when the store was active.
+            
+            ```
+            # Algorithm:
+                # if at t1 the store was active and next at t2 it became inactive, or vice versa,
+                # Then we interpolate and assume that the state changed in the middle time of t1 and t2
+                # If the state remained the same, we say that the state remained the same throughout the time between t1 and t2
+            
+            Example:
+            
+            interval = 0                       50
+            times    =     10    30   40  46 
+            status   = 1    1     0    1   0    0
+            midtimes = 0       20   35   43
+            
+            active intervals after interpolation for the given interval
+            [[0,20],[35,43]]
+            ```
+            
+        - once we encounter a new store_id, we insert the store_obj data into the DB and reinitialize the store_obj
